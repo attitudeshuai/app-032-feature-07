@@ -3,11 +3,13 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PanelDiagram from '../components/PanelDiagram.vue'
 import ChecksPanel from '../components/ChecksPanel.vue'
+import CalibrationNote from '../components/CalibrationNote.vue'
 import { getLantern } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { bodySurfaceArea } from '../core/geometry'
 import { downloadText, panelsCsv, shapeName } from '../core/exporter'
+import { activeScale, fmtCm, fmtPct, markIssued, statusOf } from '../core/calibration'
 import { coveringSpec } from '../core/craft'
 
 const route = useRoute()
@@ -18,6 +20,10 @@ const full = computed(() => {
   if (!l) return null
   return computeAll(l, { ...DEFAULT_LOFT_OPTIONS, paper: l.pageSize, overlapMm: l.overlapMm })
 })
+
+/** 超差且选择「按实测比例换算下料」时，裁片页给出纸上读数 → 实际下料对照（同用一份比例） */
+const rescale = computed(() => (lantern.value ? statusOf(lantern.value) === 'rescale' : false))
+const scale = computed(() => (lantern.value ? activeScale(lantern.value) : null) ?? 1)
 
 const ratio = computed(() => {
   const l = lantern.value
@@ -41,6 +47,7 @@ const palette = computed(() => {
 function exportCsv() {
   const l = lantern.value
   if (!l || !full.value) return
+  markIssued(l, 'panels')
   downloadText(`${l.name}-蒙面裁片清单.csv`, panelsCsv(l, full.value.panels.panels))
 }
 </script>
@@ -64,6 +71,13 @@ function exportCsv() {
         <button @click="exportCsv">导出裁片清单 CSV</button>
         <button class="primary" @click="router.push(`/print/${lantern.id}?view=labels`)">打印裁片标签</button>
       </div>
+    </section>
+
+    <CalibrationNote :lantern="lantern" />
+
+    <section v-if="rescale" class="rescale-note">
+      按实测比例 <b>{{ fmtPct(scale) }}</b> 换算下料：<b>实际下料 = 纸上读数 ÷ {{ scale.toFixed(4) }}</b>。
+      每块裁片已给出对照（mm 留 1 位小数，cm 留 1 位小数）；每一次下刀都要按此比例重新读数，看错一次就裁错一块。
     </section>
 
     <section class="stats">
@@ -95,6 +109,20 @@ function exportCsv() {
             <tr class="cut">
               <td>裁切尺寸</td>
               <td class="mono">上 {{ p.widthTopMm.toFixed(1) }} / 下 {{ p.widthBottomMm.toFixed(1) }} × 高 {{ p.heightMm.toFixed(1) }}</td>
+            </tr>
+            <tr v-if="rescale" class="paper">
+              <td>纸上读数</td>
+              <td class="mono">
+                上 {{ (p.widthTopMm * scale).toFixed(1) }} / 下 {{ (p.widthBottomMm * scale).toFixed(1) }} × 高
+                {{ (p.heightMm * scale).toFixed(1) }}（这套图纸上量到）
+              </td>
+            </tr>
+            <tr v-if="rescale" class="actual">
+              <td>实际下料</td>
+              <td class="mono">
+                上 {{ p.widthTopMm.toFixed(1) }} / 下 {{ p.widthBottomMm.toFixed(1) }} × 高 {{ p.heightMm.toFixed(1) }} mm ＝
+                {{ fmtCm(p.widthTopMm) }} / {{ fmtCm(p.widthBottomMm) }} × {{ fmtCm(p.heightMm) }} cm
+              </td>
             </tr>
             <tr>
               <td>形状 / 缝份</td>
@@ -146,7 +174,7 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-03', 'CHK-05', 'CHK-06'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-03', 'CHK-05', 'CHK-06', 'CHK-09'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
       title="裁片与分页自检"
     />
@@ -158,6 +186,16 @@ function exportCsv() {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.rescale-note {
+  background: #fdf8ec;
+  border: 1px solid #e0c78a;
+  border-left: 4px solid var(--gold);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  color: var(--ink);
 }
 
 .head {
@@ -317,6 +355,16 @@ button.primary:hover {
 .dims tr.cut td {
   color: #8f1c19;
   font-weight: 600;
+}
+
+.dims tr.paper td {
+  color: var(--ink-soft);
+}
+
+.dims tr.actual td {
+  color: #8f1c19;
+  font-weight: 700;
+  background: #fdf8ec;
 }
 
 .mono {

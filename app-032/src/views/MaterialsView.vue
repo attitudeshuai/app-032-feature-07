@@ -2,10 +2,12 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
+import CalibrationNote from '../components/CalibrationNote.vue'
 import { getLantern } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { downloadText, materialsCsv } from '../core/exporter'
+import { markIssued } from '../core/calibration'
 import { coveringSpec, CRAFT } from '../core/craft'
 import { panelCutArea } from '../core/panels'
 
@@ -42,6 +44,7 @@ const layerFabric = computed(() => {
 function exportCsv() {
   const l = lantern.value
   if (!l || !full.value) return
+  markIssued(l, 'materials')
   downloadText(`${l.name}-备料单.csv`, materialsCsv(l, full.value.materials, full.value.batch))
 }
 </script>
@@ -62,6 +65,8 @@ function exportCsv() {
         <button class="primary" @click="router.push(`/print/${lantern.id}?view=frame`)">打印备料 / 清单</button>
       </div>
     </section>
+
+    <CalibrationNote :lantern="lantern" />
 
     <section class="batch">
       <div class="field">

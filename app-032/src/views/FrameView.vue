@@ -2,11 +2,13 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
+import CalibrationNote from '../components/CalibrationNote.vue'
 import { getLantern } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { groupMembers } from '../core/frame'
 import { kindName, membersCsv, downloadText } from '../core/exporter'
+import { activeScale, fmtCm, fmtPct, markIssued, statusOf } from '../core/calibration'
 import { styleLabel } from '../core/craft'
 import type { FrameMember } from '../core/types'
 
@@ -20,6 +22,10 @@ const full = computed(() => {
 })
 const groups = computed(() => (full.value ? groupMembers(full.value.frame.members) : []))
 
+/** 超差且选择「按实测比例换算下料」时，构件表给出纸上读数 → 实际下料对照（同用一份比例） */
+const rescale = computed(() => (lantern.value ? statusOf(lantern.value) === 'rescale' : false))
+const scale = computed(() => (lantern.value ? activeScale(lantern.value) : null) ?? 1)
+
 function bendText(m: FrameMember): string {
   if (m.bendRadiusMm) return `R${m.bendRadiusMm.toFixed(1)}mm`
   if (m.bendAngleDeg) return `${m.bendAngleDeg.toFixed(1)}°`
@@ -29,6 +35,7 @@ function bendText(m: FrameMember): string {
 function exportCsv() {
   const l = lantern.value
   if (!l || !full.value) return
+  markIssued(l, 'members')
   downloadText(`${l.name}-构件清单.csv`, membersCsv(l, full.value.frame.members))
 }
 </script>
@@ -53,6 +60,13 @@ function exportCsv() {
       </div>
     </section>
 
+    <CalibrationNote :lantern="lantern" />
+
+    <section v-if="rescale" class="rescale-note">
+      按实测比例 <b>{{ fmtPct(scale) }}</b> 换算下料：<b>实际下料 = 纸上读数 ÷ {{ scale.toFixed(4) }}</b>。
+      下表已给出对照（mm 留 1 位小数，cm 留 1 位小数）；每一次下刀都要按此比例重新读数，看错一次就裁错一块。
+    </section>
+
     <section class="stats">
       <div class="stat"><span>构件总根数</span><b>{{ full.frame.totalQty }}</b></div>
       <div class="stat"><span>备料总长（含余量）</span><b>{{ (full.frame.stockLengthMm / 1000).toFixed(3) }} m</b></div>
@@ -73,6 +87,11 @@ function exportCsv() {
             <th class="num">数量</th>
             <th class="num">总截取长 (mm)</th>
             <th>弯曲半径 / 折角</th>
+            <template v-if="rescale">
+              <th class="num">纸上读数 (mm)</th>
+              <th class="num">实际下料 (mm)</th>
+              <th class="num">实际下料 (cm)</th>
+            </template>
             <th>说明</th>
           </tr>
         </thead>
@@ -86,6 +105,11 @@ function exportCsv() {
             <td class="num mono">{{ m.qty }}</td>
             <td class="num mono">{{ (m.lengthMm * m.qty).toFixed(1) }}</td>
             <td class="mono small">{{ bendText(m) }}</td>
+            <template v-if="rescale">
+              <td class="num mono">{{ (m.lengthMm * scale).toFixed(1) }}</td>
+              <td class="num mono strong">{{ m.lengthMm.toFixed(1) }}</td>
+              <td class="num mono">{{ fmtCm(m.lengthMm) }}</td>
+            </template>
             <td class="note">{{ m.note }}</td>
           </tr>
         </tbody>
@@ -93,7 +117,7 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08', 'CHK-09'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
       title="骨架计算自检"
     />
@@ -105,6 +129,16 @@ function exportCsv() {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.rescale-note {
+  background: #fdf8ec;
+  border: 1px solid #e0c78a;
+  border-left: 4px solid var(--gold);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  color: var(--ink);
 }
 
 .head {

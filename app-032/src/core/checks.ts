@@ -7,8 +7,18 @@ import { bodySurfaceArea, polygonEdge, ringPerimeter, segmentInfos } from './geo
 import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
 import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
-import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
+import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet, type SheetItemStrip } from './paginate'
 import { CRAFT } from './craft'
+import {
+  CALIBRATION_TOLERANCE_MM,
+  calibrationOf,
+  docKindName,
+  fmtPct,
+  staleDocs,
+  statusOf
+} from './calibration'
+
+export { CALIBRATION_CIRCLE_MM, CALIBRATION_RULER_MM } from './calibration'
 
 export interface FullResult {
   frame: FrameResult
@@ -191,6 +201,79 @@ function runChecks(
     })
   }
 
+  // ---- CHK-09 打印比例一致性（角注 / 换算 / 导出单子 / 本机存档同源） ----
+  {
+    const c = calibrationOf(l)
+    if (!c) {
+      out.push({
+        id: 'CHK-09',
+        title: '打印比例一致性（角注 / 换算 / 存档同源）',
+        pass: true,
+        value: '未校验',
+        detail:
+          '本灯样还没有打印比例记录（旧灯样无此值按未校验处理，不当成原大）：所有角注显示「未校验」；打印后请实测 100mm 校验尺并回填'
+      })
+    } else {
+      const recomputed = c.measuredMm / c.nominalMm
+      const scaleOk = Math.abs(recomputed - c.scale) < 1e-9
+      const tolOk = c.withinTolerance === Math.abs(c.measuredMm - c.nominalMm) <= CALIBRATION_TOLERANCE_MM
+      const stale = staleDocs(l)
+      const pass = scaleOk && tolOk && stale.length === 0
+      const st = statusOf(l)
+      const stName =
+        st === 'ok' ? '已校验' : st === 'rescale' ? '按实测换算下料' : st === 'reprint' ? '作废待重打' : '超差待处置'
+      out.push({
+        id: 'CHK-09',
+        title: '打印比例一致性（角注 / 换算 / 存档同源）',
+        pass,
+        value: `比例 ${fmtPct(c.scale)}（${stName}）`,
+        detail:
+          `图纸各页角注、构件表 / 裁片页换算、三份导出单子、本机存档同用比例 ${fmtPct(c.scale)}` +
+          (stale.length
+            ? `；仍按老比例出具、需作废重来的有：${stale.map((d) => docKindName(d.kind)).join('、')}（若已照其裁料，已裁裁片一并作废）`
+            : '；已出具的图纸与单子均为当前比例')
+      })
+    }
+  }
+
+  // ---- CHK-10 长条分段编号连续（不许重号、不许断号） ----
+  {
+    const strips: SheetItemStrip[] = []
+    for (const s of sheets) for (const it of s.items) if (it.type === 'strip') strips.push(it)
+    const tagCount = new Map<string, number>()
+    for (const it of strips) tagCount.set(it.tag, (tagCount.get(it.tag) || 0) + 1)
+    const dupTags = [...tagCount.entries()].filter(([, n]) => n > 1).map(([t]) => t)
+    const byMember = new Map<string, SheetItemStrip[]>()
+    for (const it of strips) {
+      const arr = byMember.get(it.member.id) || []
+      arr.push(it)
+      byMember.set(it.member.id, arr)
+    }
+    const problems: string[] = []
+    for (const arr of byMember.values()) {
+      const n = arr[0].segCount
+      const sorted = [...arr].sort((a, b) => a.segIndex - b.segIndex)
+      const label = arr[0].member.label
+      if (arr.length !== n || sorted.some((it, i) => it.segIndex !== i)) {
+        problems.push(`「${label}」分段 ${sorted.map((it) => it.segIndex + 1).join('/')}/${n} 断号或重号`)
+      }
+      sorted.forEach((it, i) => {
+        if (i > 0 && it.prevTag !== sorted[i - 1].tag) problems.push(`「${label}」第 ${i + 1} 段接不上前一段`)
+        if (i < sorted.length - 1 && it.nextTag !== sorted[i + 1].tag) problems.push(`「${label}」第 ${i + 1} 段接不上后一段`)
+      })
+    }
+    const pass = dupTags.length === 0 && problems.length === 0
+    out.push({
+      id: 'CHK-10',
+      title: '长条分段编号按顺序接得上（无重号、无断号）',
+      pass,
+      value: pass ? `${byMember.size} 根构件分段连续` : '编号异常',
+      detail: pass
+        ? `共 ${strips.length} 段长条，分属 ${byMember.size} 根构件；每根分段 1..n 顺序衔接，整份图纸无重号、无断号（改纸张或搭接量后整份重排仍成立）`
+        : [...problems, ...(dupTags.length ? [`重号：${dupTags.join('、')}`] : [])].join('；')
+    })
+  }
+
   return out
 }
 
@@ -212,10 +295,6 @@ function loftOverlap(sheets: Sheet[]): number {
   }
   return 0
 }
-
-/** 校验尺标称长度（mm）：1:1 打印用 */
-export const CALIBRATION_RULER_MM = 100
-export const CALIBRATION_CIRCLE_MM = 100
 
 function frameGeometryOf(l: Lantern) {
   return buildFrame(l).geometry

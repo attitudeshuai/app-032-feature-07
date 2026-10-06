@@ -2,6 +2,19 @@
 import type { FrameMember, Lantern, Panel } from './types'
 import type { BatchMaterials, SingleLightMaterials } from './materials'
 import { coveringSpec } from './craft'
+import { activeScale, cornerNote, fmtCm, fmtPct, statusOf } from './calibration'
+
+/** 三份导出单子共用的打印比例角注行（与图纸页角注、本机存档同一份比例） */
+function calibrationRows(l: Lantern): (string | number)[][] {
+  const rows: (string | number)[][] = [[`打印比例角注：${cornerNote(l)}`]]
+  if (statusOf(l) === 'rescale') {
+    const s = activeScale(l)!
+    rows.push([
+      `换算说明：实际下料 = 纸上读数 ÷ ${s.toFixed(4)}（实测比例 ${fmtPct(s)}）；精度：mm 留 1 位小数，cm 留 1 位小数`
+    ])
+  }
+  return rows
+}
 
 function csvCell(v: string | number): string {
   const s = String(v)
@@ -25,11 +38,17 @@ export function downloadText(filename: string, content: string, mime = 'text/csv
 }
 
 export function membersCsv(l: Lantern, members: FrameMember[]): string {
+  const rescale = statusOf(l) === 'rescale'
+  const s = activeScale(l) ?? 1
   const rows: (string | number)[][] = [
     [`花灯构件清单 · ${l.name}`],
+    ...calibrationRows(l),
     [`最大直径 ${l.maxDiameterMm}mm / 总高 ${l.totalHeightMm}mm / 绑扎余量 每端 ${l.lashAllowanceMm}mm / 生成 ${new Date().toLocaleString()}`],
     [],
-    ['构件名称', '类别', '分组', '净长(mm)', '截取长度(mm,含余量)', '余量处数', '数量', '总截取长度(mm)', '弯曲半径(mm)', '折角(°)', '备注']
+    [
+      '构件名称', '类别', '分组', '净长(mm)', '截取长度(mm,含余量)', '余量处数', '数量', '总截取长度(mm)', '弯曲半径(mm)', '折角(°)', '备注',
+      ...(rescale ? ['纸上读数(mm)', '实际下料(mm)', '实际下料(cm)'] : [])
+    ]
   ]
   for (const m of members) {
     rows.push([
@@ -43,22 +62,29 @@ export function membersCsv(l: Lantern, members: FrameMember[]): string {
       (m.lengthMm * m.qty).toFixed(1),
       m.bendRadiusMm ? m.bendRadiusMm.toFixed(1) : '—',
       m.bendAngleDeg ? m.bendAngleDeg.toFixed(1) : '—',
-      m.note || ''
+      m.note || '',
+      ...(rescale ? [(m.lengthMm * s).toFixed(1), m.lengthMm.toFixed(1), fmtCm(m.lengthMm)] : [])
     ])
   }
-  const stock = members.reduce((s, m) => s + m.lengthMm * m.qty, 0)
-  const raw = members.reduce((s, m) => s + m.rawLengthMm * m.qty, 0)
+  const stock = members.reduce((s2, m) => s2 + m.lengthMm * m.qty, 0)
+  const raw = members.reduce((s2, m) => s2 + m.rawLengthMm * m.qty, 0)
   rows.push([])
-  rows.push(['合计', '', '', raw.toFixed(1), '', '', members.reduce((s, m) => s + m.qty, 0), stock.toFixed(1), '', '', `备料 ${(stock / 1000).toFixed(3)}m`])
+  rows.push(['合计', '', '', raw.toFixed(1), '', '', members.reduce((s2, m) => s2 + m.qty, 0), stock.toFixed(1), '', '', `备料 ${(stock / 1000).toFixed(3)}m`])
   return toCsv(rows)
 }
 
 export function panelsCsv(l: Lantern, panels: Panel[]): string {
+  const rescale = statusOf(l) === 'rescale'
+  const s = activeScale(l) ?? 1
   const rows: (string | number)[][] = [
     [`蒙面裁片清单 · ${l.name}`],
+    ...calibrationRows(l),
     [`蒙面 ${coveringSpec(l.covering).name} / 缝份 每边 ${l.seamAllowanceMm}mm（已含在裁片尺寸内）/ 生成 ${new Date().toLocaleString()}`],
     [],
-    ['裁片编号', '名称', '形状', '净上宽(mm)', '净下宽(mm)', '净高(mm)', '裁切上宽(mm)', '裁切下宽(mm)', '裁切高(mm)', '半径/对边(mm)', '数量', '对位标记数']
+    [
+      '裁片编号', '名称', '形状', '净上宽(mm)', '净下宽(mm)', '净高(mm)', '裁切上宽(mm)', '裁切下宽(mm)', '裁切高(mm)', '半径/对边(mm)', '数量', '对位标记数',
+      ...(rescale ? ['纸上读数上宽(mm)', '纸上读数下宽(mm)', '纸上读数高(mm)', '实际下料上宽(cm)', '实际下料下宽(cm)', '实际下料高(cm)'] : [])
+    ]
   ]
   for (const p of panels) {
     rows.push([
@@ -73,7 +99,17 @@ export function panelsCsv(l: Lantern, panels: Panel[]): string {
       p.heightMm.toFixed(1),
       p.radiusMm ? p.radiusMm.toFixed(1) : '—',
       p.qty,
-      p.marksMm.length
+      p.marksMm.length,
+      ...(rescale
+        ? [
+            (p.widthTopMm * s).toFixed(1),
+            (p.widthBottomMm * s).toFixed(1),
+            (p.heightMm * s).toFixed(1),
+            fmtCm(p.widthTopMm),
+            fmtCm(p.widthBottomMm),
+            fmtCm(p.heightMm)
+          ]
+        : [])
     ])
   }
   return toCsv(rows)
@@ -87,6 +123,7 @@ export function materialsCsv(
   const cov = coveringSpec(l.covering)
   const rows: (string | number)[][] = [
     [`备料单 · ${l.name}`],
+    ...calibrationRows(l),
     [`生成 ${new Date().toLocaleString()} / 单位 mm·m²·m·g`],
     [],
     ['项目', '单灯用量', '单位', `批量 ${batch.count} 个（含 ${(batch.wasteRatio * 100).toFixed(0)}% 损耗）`],

@@ -63,8 +63,49 @@ export interface Lantern {
   pageSize: PageSize
   /** 长条图跨页搭接量（mm） */
   overlapMm: number
+  /**
+   * 打印比例校验记录（null / 缺省 = 未校验）。
+   * 旧灯样没有此值时一律按「没量过」处理，不许当成原大。
+   */
+  printCalibration?: PrintCalibration | null
+  /** 已出具（导出 / 打印）的图纸与单子登记，用于点名仍按老比例出具的那一处 */
+  issuedDocs?: IssuedDoc[]
   createdAt: string
   updatedAt: string
+}
+
+/** 超差时的取舍：按实测比例换算下料 / 要求重打到原大 */
+export type CalibrationResolution = 'rescale' | 'reprint'
+
+/** 打印比例校验记录（量出来的长度 mm 留 1 位小数；比例以百分数展示留 2 位小数） */
+export interface PrintCalibration {
+  /** 实测校验尺长度（mm，1 位小数） */
+  measuredMm: number
+  /** 校验尺标称长度（mm） */
+  nominalMm: number
+  /** 实测比例 = measuredMm / nominalMm */
+  scale: number
+  /** 偏差是否未超容差（|实测 − 标称| ≤ 1mm） */
+  withinTolerance: boolean
+  /** 超差时的取舍（未超差或尚未取舍为 null） */
+  resolution: CalibrationResolution | null
+  /** 记录时的纸张 / 搭接量快照（改纸张或搭接会整份重排分页，比例记录仍有效） */
+  pageSize: PageSize
+  overlapMm: number
+  /** 记录时间（ISO） */
+  at: string
+}
+
+/** 已出具单据的种类：1:1 放样图纸 / 构件清单 / 裁片清单 / 备料单 */
+export type IssuedDocKind = 'loft' | 'members' | 'panels' | 'materials'
+
+export interface IssuedDoc {
+  kind: IssuedDocKind
+  /** 出具时的比例签名（见 calibration.ts scaleSignature），与当前不一致即按老比例出具 */
+  signature: string
+  /** 出具时使用的实测比例（未校验为 null） */
+  scale: number | null
+  at: string
 }
 
 export interface FrameMember {

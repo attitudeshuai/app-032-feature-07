@@ -186,7 +186,10 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
   if (opts.includeStrips) {
     const usable = contentW - STRIP_GUTTER - 4
     const overlap = Math.max(0, opts.overlapMm)
+    // 长条分段编号：整份图纸内每根构件一个顺序号，段号 1..n 衔接，不重号、不断号
+    let memberSeq = 0
     for (const m of buildFrame(l).members) {
+      memberSeq++
       const total = m.lengthMm
       const advanceMm = Math.max(10, usable - overlap)
       const segCount = total <= usable + EPS ? 1 : Math.ceil((total - overlap) / advanceMm)
@@ -196,7 +199,7 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
         if (!fitsRow(contentW)) nextRow()
         if (!fitsPage(STRIP_ROW_H)) startSheet()
         const cur = ensureSheet()
-        const tag = `S${cur.index}-${i + 1}/${segCount}`
+        const tag = `S${memberSeq}-${i + 1}/${segCount}`
         cur.items.push({
           type: 'strip',
           member: m,

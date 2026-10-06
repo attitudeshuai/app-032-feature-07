@@ -6,11 +6,29 @@
  * - 骨架长条跨页处绘制对位十字、拼接编号与搭接量；
  * - 附 100mm 校验尺与 Ø100 校验圆，并显式提示「请关闭『适应页面』并按 100% 打印」。
  */
-import { computed, onUnmounted, reactive, watch, watchEffect } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
 import { getLantern } from '../core/store'
-import { CALIBRATION_CIRCLE_MM, CALIBRATION_RULER_MM, computeAll } from '../core/checks'
+import { computeAll } from '../core/checks'
+import {
+  CALIBRATION_CIRCLE_MM,
+  CALIBRATION_RULER_MM,
+  CALIBRATION_TOLERANCE_MM,
+  activeScale,
+  calibrationOf,
+  clearCalibration,
+  cornerNote,
+  docKindName,
+  fmtCm,
+  fmtPct,
+  markIssued,
+  recordCalibration,
+  scaleTag,
+  setResolution,
+  staleDocs,
+  statusOf
+} from '../core/calibration'
 import {
   DEFAULT_LOFT_OPTIONS,
   PAPER_DIMS,
@@ -65,6 +83,67 @@ const full = computed(() => {
   return computeAll(l, { ...opts })
 })
 
+// ---------- 打印比例校验 ----------
+/** 回填的实测校验尺长度（mm，1 位小数） */
+const measuredInput = ref<number | null>(null)
+
+watch(
+  lantern,
+  (l) => {
+    measuredInput.value = l ? (calibrationOf(l)?.measuredMm ?? null) : null
+  },
+  { immediate: true }
+)
+
+const cal = computed(() => (lantern.value ? calibrationOf(lantern.value) : null))
+const calStatus = computed(() => (lantern.value ? statusOf(lantern.value) : 'unmeasured'))
+const rescaleMode = computed(() => calStatus.value === 'rescale')
+const scale = computed(() => (lantern.value ? activeScale(lantern.value) : null) ?? 1)
+const cornerNoteText = computed(() => (lantern.value ? cornerNote(lantern.value) : ''))
+const scaleTagText = computed(() => (lantern.value ? scaleTag(lantern.value) : ''))
+const stale = computed(() => (lantern.value ? staleDocs(lantern.value) : []))
+
+/** 输入预览：按标称长度算出这次实际的比例，并判定是否超容差 */
+const preview = computed(() => {
+  const v = measuredInput.value
+  if (v == null || !isFinite(v) || v <= 0) return null
+  const measured = Math.round(v * 10) / 10
+  const devMm = measured - CALIBRATION_RULER_MM
+  return {
+    measured,
+    scale: measured / CALIBRATION_RULER_MM,
+    devMm,
+    within: Math.abs(devMm) <= CALIBRATION_TOLERANCE_MM
+  }
+})
+
+function record() {
+  const l = lantern.value
+  if (!l || !preview.value) return
+  recordCalibration(l, preview.value.measured)
+}
+
+function chooseResolution(r: 'rescale' | 'reprint') {
+  if (lantern.value) setResolution(lantern.value, r)
+}
+
+function clearCal() {
+  if (lantern.value) clearCalibration(lantern.value)
+}
+
+function staleText(): string {
+  return stale.value
+    .map((d) => `${docKindName(d.kind)}（出具时 ${d.scale != null ? fmtPct(d.scale) : '未校验'}）`)
+    .join('、')
+}
+
+function fmtTime(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(
+    d.getHours()
+  ).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 const sheets = computed(() => full.value?.sheets ?? [])
 const splitCheck = computed(() => assertNoPanelSplit(sheets.value))
 const frameGroups = computed(() => (full.value ? groupMembers(full.value.frame.members) : []))
@@ -106,6 +185,9 @@ function setMode(m: PrintMode) {
 }
 
 function doPrint() {
+  const l = lantern.value
+  // 出具即登记：改比例或改取舍后，仍按老比例出具的那一处会被点名作废
+  if (l) markIssued(l, mode.value === 'frame' ? 'members' : mode.value === 'labels' ? 'panels' : 'loft')
   window.print()
 }
 
@@ -257,8 +339,91 @@ function today(): string {
 
       <p v-if="mode === 'loft'" class="warn">
         ⚠ 请在打印对话框里把缩放设为 <b>100%</b>（关闭「适应页面 / Fit to page」），纸张选
-        {{ opts.paper }}，页边距选「无」；打印后先用第 1 页的 100mm 校验尺核对，误差应 ≤ 1mm。
+        {{ opts.paper }}，页边距选「无」；打印后先用第 1 页的 100mm 校验尺核对，误差应 ≤ 1mm，
+        并把量到的长度填进下方「打印比例校验」。
       </p>
+
+      <!-- ============ 打印比例校验 ============ -->
+      <section v-if="mode === 'loft'" class="calib">
+        <h3>
+          打印比例校验
+          <span class="hint">
+            校验尺标称 {{ CALIBRATION_RULER_MM }}.0mm · 容差 ±{{ CALIBRATION_TOLERANCE_MM }}.0mm ·
+            实测长度 mm 留 1 位小数，比例 % 留 2 位小数，换算 cm 留 1 位小数
+          </span>
+        </h3>
+        <div class="calib-row">
+          <label>
+            实测校验尺长度（mm）
+            <input
+              v-model.number="measuredInput"
+              type="number"
+              min="50"
+              max="150"
+              step="0.1"
+              placeholder="打印后量第 1 页校验尺"
+            />
+          </label>
+          <button class="primary" :disabled="!preview" @click="record">记录校验</button>
+          <button v-if="cal" @click="clearCal">清除记录</button>
+          <span v-if="preview" class="preview mono">
+            比例 {{ fmtPct(preview.scale) }} · 偏差 {{ preview.devMm >= 0 ? '+' : '' }}{{ preview.devMm.toFixed(1) }}mm
+            <b :class="preview.within ? 'ok' : 'bad'">{{ preview.within ? '未超容差' : '超过容差' }}</b>
+          </span>
+        </div>
+
+        <p v-if="calStatus === 'unmeasured'" class="cal-msg">
+          本灯样还没有校验记录（旧灯样没有这个值，一律按没量过处理，不当成原大）。请先打印第 1 页校验尺，
+          用钢尺量出实际长度填回上面，页面会按标称 {{ CALIBRATION_RULER_MM }}.0mm 算出这次实际的比例。
+        </p>
+        <p v-else-if="calStatus === 'ok' && cal" class="cal-msg ok-msg">
+          ✓ 已校验：实测 {{ cal.measuredMm.toFixed(1) }}mm / 标称 {{ cal.nominalMm.toFixed(1) }}mm → 比例
+          <b>{{ fmtPct(cal.scale) }}</b>，偏差 {{ Math.abs(cal.measuredMm - cal.nominalMm).toFixed(1) }}mm ≤
+          {{ CALIBRATION_TOLERANCE_MM }}.0mm。这次的比例已记在这盏灯上（本机存档），图纸各页角注、三份导出单子、
+          构件表与裁片页同用这一份。
+          <span class="hint">记录于 {{ fmtTime(cal.at) }} · 当时纸张 {{ cal.pageSize }} · 搭接 {{ cal.overlapMm }}mm</span>
+        </p>
+        <div v-else-if="cal" class="cal-msg bad-msg">
+          <p>
+            ✗ <b>这套图纸标为不可用</b>：实测 {{ cal.measuredMm.toFixed(1) }}mm / 标称 {{ cal.nominalMm.toFixed(1) }}mm →
+            比例 <b>{{ fmtPct(cal.scale) }}</b>，偏差 {{ Math.abs(cal.measuredMm - cal.nominalMm).toFixed(1) }}mm 超过容差
+            {{ CALIBRATION_TOLERANCE_MM }}.0mm。
+          </p>
+          <p>
+            改法（任选一条改完重打）：① 打印对话框关掉「适应页面 / Fit to page」、缩放设 100%；
+            ② 换幅面更大的纸（A3）；③ 分幅打印，按拼接编号接纸。
+          </p>
+          <p class="pick">实测比例与标称对不上，只有两条路，挑一条并认下代价：</p>
+          <label class="choice">
+            <input type="radio" name="resolution" :checked="cal.resolution === 'rescale'" @change="chooseResolution('rescale')" />
+            <span>
+              <b>按实测比例换算下料</b>（图纸照旧能用）：实际下料 = 纸上读数 ÷ {{ cal.scale.toFixed(4) }}。
+              代价：每一次下刀都要按 {{ fmtPct(cal.scale) }} 重新读数，看错一次就裁错一块。
+            </span>
+          </label>
+          <label class="choice">
+            <input type="radio" name="resolution" :checked="cal.resolution === 'reprint'" @change="chooseResolution('reprint')" />
+            <span>
+              <b>要求重打到原大才放行</b>（纸上量多少就是多少）。
+              代价：图纸与随附的单子要重出，已经发到作坊的那一套作废，纸料与工时白搭。
+            </span>
+          </label>
+          <p v-if="calStatus === 'rescale'" class="cal-msg">
+            已选「按实测比例换算」：骨架构件表与蒙面裁片页已给出「纸上读数 → 实际下料」对照（同用比例
+            {{ fmtPct(cal.scale) }}），图纸角注与导出单子同步刷新。例：标称 100.0mm 在这套图纸上量到
+            {{ (100 * cal.scale).toFixed(1) }}mm，实际下料仍取 100.0mm（{{ fmtCm(100) }}cm）。
+          </p>
+          <p v-else-if="calStatus === 'reprint'" class="cal-msg">
+            已选「重打到原大」：本套图纸与已出具的单子作废，重打后把新校验尺的实测长度填回上面，重新校验合格才放行。
+          </p>
+          <p v-else class="cal-msg">尚未选择处置方式，这套图纸保持「不可用」，不得下料。</p>
+        </div>
+
+        <p v-if="stale.length" class="cal-msg stale-msg">
+          ⚠ 以下 {{ stale.length }} 处仍按老比例出具，与当前比例不一致，已作废、需重新导出 / 打印：<b>{{ staleText() }}</b>。
+          若已照老比例裁料，已裁好的那几片一并作废重来。
+        </p>
+      </section>
 
       <section v-if="mode === 'loft'" class="summary">
         <div class="stat"><span>图纸页数</span><b>{{ sheets.length }} 页</b></div>
@@ -393,8 +558,12 @@ function today(): string {
                 ⑥ 导出 PDF：在打印对话框选择「另存为 PDF」，尺寸与打印完全一致（本页已按 {{ opts.paper }}
                 设置 @page 尺寸）。
               </text>
+              <text class="cal-note" :x="it.xMm" :y="it.yMm + 230">
+                ⑦ 量完校验尺后，把实测长度填回本页面上方「打印比例校验」：页面按标称 100.0mm 算出实际比例并判定容差；
+                未回填前本套图纸按「未校验」处理，不得当成原大下料。
+              </text>
               <text class="cal-foot" :x="it.xMm" :y="it.yMm + it.hMm - 2">
-                {{ lantern.name }} · 1:1 校验页 · {{ today() }}
+                {{ lantern.name }} · 1:1 校验页 · {{ scaleTagText }} · {{ today() }}
               </text>
             </g>
 
@@ -562,7 +731,7 @@ function today(): string {
           </g>
 
           <text class="sheet-foot" :x="s.contentX" :y="s.hMm - 3.4">
-            {{ lantern.name }} · {{ sheetFoot(s) }} · 单位 mm · 1:1（100% 打印）
+            {{ lantern.name }} · {{ sheetFoot(s) }} · {{ scaleTagText }} · 单位 mm · 请按 100% 打印
           </text>
         </svg>
       </section>
@@ -578,6 +747,11 @@ function today(): string {
         每端绑扎余量 {{ lantern.lashAllowanceMm }}mm · 蒙面 {{ coveringLabel(lantern.covering) }} ·
         打印日期 {{ today() }}
       </p>
+      <p class="doc-calib">打印比例角注：{{ cornerNoteText }}</p>
+      <p v-if="rescaleMode" class="doc-calib">
+        换算下料：实际下料 = 纸上读数 ÷ {{ scale.toFixed(4) }}（实测比例 {{ fmtPct(scale) }}）；
+        纸上读数 / 实际下料 mm 留 1 位小数，cm 留 1 位小数。每一次下刀都要按此比例重新读数。
+      </p>
       <table class="doc-table">
         <thead>
           <tr>
@@ -590,12 +764,17 @@ function today(): string {
             <th class="num">数量</th>
             <th class="num">总截取长 (mm)</th>
             <th>弯曲半径 / 折角</th>
+            <template v-if="rescaleMode">
+              <th class="num">纸上读数 (mm)</th>
+              <th class="num">实际下料 (mm)</th>
+              <th class="num">实际下料 (cm)</th>
+            </template>
           </tr>
         </thead>
         <tbody>
           <template v-for="grp in frameGroups" :key="grp.group">
             <tr class="doc-group">
-              <td colspan="9">{{ grp.group }}</td>
+              <td :colspan="rescaleMode ? 12 : 9">{{ grp.group }}</td>
             </tr>
             <tr v-for="m in grp.items" :key="m.id">
               <td>{{ m.label }}</td>
@@ -607,6 +786,11 @@ function today(): string {
               <td class="num mono">{{ m.qty }}</td>
               <td class="num mono">{{ f1(m.lengthMm * m.qty) }}</td>
               <td class="mono">{{ m.bendRadiusMm ? `R${f1(m.bendRadiusMm)}mm` : m.bendAngleDeg ? `${f1(m.bendAngleDeg)}°` : '—' }}</td>
+              <template v-if="rescaleMode">
+                <td class="num mono">{{ f1(m.lengthMm * scale) }}</td>
+                <td class="num mono strong">{{ f1(m.lengthMm) }}</td>
+                <td class="num mono">{{ fmtCm(m.lengthMm) }}</td>
+              </template>
             </tr>
           </template>
         </tbody>
@@ -643,12 +827,13 @@ function today(): string {
           </div>
         </div>
       </div>
+      <div class="lp-foot">打印比例角注：{{ cornerNoteText }}</div>
     </section>
 
     <ChecksPanel
       v-if="full && mode === 'loft'"
       class="no-print"
-      :checks="full.checks.filter((c) => ['CHK-05', 'CHK-06', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-05', 'CHK-06', 'CHK-08', 'CHK-09', 'CHK-10'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
       title="放样与分页自检"
     />
@@ -822,6 +1007,121 @@ button.primary:hover {
 
 .bad {
   color: var(--red);
+}
+
+/* ---------- 打印比例校验 ---------- */
+.calib {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--gold);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.calib h3 {
+  margin: 0;
+  font-size: 13.5px;
+  color: #8f1c19;
+}
+
+.calib .hint {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ink-soft);
+  margin-left: 8px;
+}
+
+.calib-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.calib-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+}
+
+.calib-row input[type='number'] {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 4px 6px;
+  width: 150px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.calib-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.preview {
+  font-size: 12.5px;
+}
+
+.cal-msg {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.ok-msg {
+  color: var(--jade);
+}
+
+.bad-msg {
+  background: #fbeae6;
+  border: 1px solid #e7c3bb;
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bad-msg p {
+  margin: 0;
+}
+
+.bad-msg .pick {
+  font-weight: 600;
+  color: #8f1c19;
+}
+
+.choice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.choice input {
+  margin-top: 3px;
+}
+
+.stale-msg {
+  background: #fbeae6;
+  border: 1px solid #e7c3bb;
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #8f1c19;
 }
 
 /* ---------- 图纸 ---------- */
@@ -1018,6 +1318,16 @@ button.primary:hover {
   padding-bottom: 8px;
 }
 
+.doc-calib {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #8f1c19;
+  background: #fdf8ec;
+  border: 1px solid #e0c78a;
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+
 .doc-table {
   width: 100%;
   border-collapse: collapse;
@@ -1150,6 +1460,14 @@ button.primary:hover {
   color: #6a5c52;
   border-top: 0.2mm solid #ddd0bd;
   padding-top: 0.8mm;
+}
+
+.lp-foot {
+  margin-top: 3mm;
+  font-size: 2.8mm;
+  color: #8f1c19;
+  border-top: 0.2mm solid #ddd0bd;
+  padding-top: 1.2mm;
 }
 
 .missing {

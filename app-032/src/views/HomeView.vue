@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { COVERINGS, PRESETS, coveringLabel, kindLabel, styleLabel } from '../core/craft'
 import { addLantern, createFromPreset, duplicateLantern, removeLantern, state } from '../core/store'
+import { statusTag } from '../core/calibration'
 
 const router = useRouter()
 
@@ -87,6 +88,7 @@ function updatedAt(iso: string): string {
             <th>尺寸</th>
             <th>层数 / 棱数</th>
             <th>蒙面</th>
+            <th>打印比例</th>
             <th>最近修改</th>
             <th>操作</th>
           </tr>
@@ -98,6 +100,7 @@ function updatedAt(iso: string): string {
             <td class="mono">⌀{{ l.maxDiameterMm }} × H{{ l.totalHeightMm }}</td>
             <td class="mono">{{ l.layers.length }} 层 / {{ l.sides }} 棱</td>
             <td>{{ coveringLabel(l.covering) }}</td>
+            <td class="mono">{{ statusTag(l) }}</td>
             <td class="mono">{{ updatedAt(l.updatedAt) }}</td>
             <td class="ops">
               <button @click="open(l.id)">打开</button>

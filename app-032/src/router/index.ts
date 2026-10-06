@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-const routes: RouteRecordRaw[] = [
+export const routes: RouteRecordRaw[] = [
   { path: '/', name: 'home', component: () => import('../views/HomeView.vue'), meta: { title: '灯型选择与新建' } },
   { path: '/design/:id', name: 'design', component: () => import('../views/DesignView.vue'), meta: { title: '参数与灯体预览' } },
   { path: '/frame/:id', name: 'frame', component: () => import('../views/FrameView.vue'), meta: { title: '骨架构件表' } },
