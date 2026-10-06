@@ -7,7 +7,8 @@ import { bodySurfaceArea, polygonEdge, ringPerimeter, segmentInfos } from './geo
 import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
 import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
-import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
+import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet, type SheetItemStrip } from './paginate'
+import { calibrationOutlets, fmtScalePct, staleOutlets, NOMINAL_RULER_MM } from './calibration'
 import { CRAFT } from './craft'
 
 export interface FullResult {
@@ -191,6 +192,70 @@ function runChecks(
     })
   }
 
+  // ---- CHK-09 比例一致：同一份实测比例落到每一处 ----
+  {
+    const outlets = calibrationOutlets(l)
+    const first = outlets[0]?.scale ?? null
+    const mismatched = outlets.filter((o) => o.scale !== first).map((o) => o.name)
+    const stale = staleOutlets(l)
+    const pass = mismatched.length === 0 && stale.length === 0
+    const cal = l.calibration
+    out.push({
+      id: 'CHK-09',
+      title: '比例一致：图纸角注 / 三份导出单子 / 换算列 / 存档同一份比例',
+      pass,
+      value: cal ? `实测比例 ${fmtScalePct(cal.scale)}` : '未校验',
+      detail: pass
+        ? cal
+          ? `${outlets.length} 处出口（${outlets.map((o) => o.name).join('、')}）均按 ${fmtScalePct(cal.scale)} 显示，与存档环境（${cal.paper} · 搭接 ${cal.overlapMm.toFixed(1)}mm）一致`
+          : `尚未实测 ${NOMINAL_RULER_MM.toFixed(1)}mm 校验尺：${outlets.length} 处出口统一显示「比例未校验」，不按原大处理`
+        : `仍按老比例/老环境显示的出口：${[...mismatched, ...stale].join('、')} —— 改纸张或搭接量后整套分页已重排，请重新打印校验尺实测回填`
+    })
+  }
+
+  // ---- CHK-10 长条分段编号：整份重排后按顺序接得上，不重号、不断号 ----
+  {
+    const strips: SheetItemStrip[] = []
+    for (const s of sheets) for (const it of s.items) if (it.type === 'strip') strips.push(it)
+    const tags = new Set<string>()
+    let dup = 0
+    for (const t of strips) {
+      if (tags.has(t.tag)) dup++
+      tags.add(t.tag)
+    }
+    const byMember = new Map<string, SheetItemStrip[]>()
+    for (const t of strips) {
+      const arr = byMember.get(t.member.id) || []
+      arr.push(t)
+      byMember.set(t.member.id, arr)
+    }
+    const broken: string[] = []
+    for (const [id, arr0] of byMember) {
+      const arr = [...arr0].sort((a, b) => a.segIndex - b.segIndex)
+      // 断号/重号：段序必须恰好是 0..n-1，且每段记录的 segCount 与实际段数一致
+      const seqOk = arr.every((a, i) => a.segIndex === i && a.segCount === arr.length)
+      // 衔接：下一段起点 = 上一段起点 + 上一段长 − 搭接；拼接编号互为前后段
+      let linkOk = true
+      for (let i = 1; i < arr.length; i++) {
+        const p = arr[i - 1]
+        const c = arr[i]
+        if (Math.abs(c.startMm - (p.startMm + p.lengthMm - p.overlapMm)) > 0.05) linkOk = false
+        if (c.prevTag !== p.tag || p.nextTag !== c.tag) linkOk = false
+      }
+      if (!seqOk || !linkOk) broken.push(id)
+    }
+    const pass = dup === 0 && broken.length === 0
+    out.push({
+      id: 'CHK-10',
+      title: '长条分段编号：换纸张/搭接整份重排后按顺序接得上，不重号、不断号',
+      pass,
+      value: `${strips.length} 段 / ${byMember.size} 根`,
+      detail: pass
+        ? `全部 ${strips.length} 段拼接编号唯一；每根构件分段 1..n 连续，跨页处下一段起点 = 上一段终点 − 搭接 ${f1(loftOverlap(sheets))}mm，首尾接得上`
+        : `问题：重号 ${dup} 个${broken.length ? `；断号或衔接异常构件 ${broken.join('、')}` : ''}`
+    })
+  }
+
   return out
 }
 
@@ -213,8 +278,8 @@ function loftOverlap(sheets: Sheet[]): number {
   return 0
 }
 
-/** 校验尺标称长度（mm）：1:1 打印用 */
-export const CALIBRATION_RULER_MM = 100
+/** 校验尺标称长度（mm）：1:1 打印用（定义见 calibration.ts，此处兼容旧引用） */
+export const CALIBRATION_RULER_MM = NOMINAL_RULER_MM
 export const CALIBRATION_CIRCLE_MM = 100
 
 function frameGeometryOf(l: Lantern) {

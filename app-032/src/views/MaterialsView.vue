@@ -8,6 +8,7 @@ import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { downloadText, materialsCsv } from '../core/exporter'
 import { coveringSpec, CRAFT } from '../core/craft'
 import { panelCutArea } from '../core/panels'
+import { calibrationNote, fmtScalePct, recordedScale } from '../core/calibration'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,6 +20,10 @@ const full = computed(() => {
 })
 
 const cov = computed(() => (lantern.value ? coveringSpec(lantern.value.covering) : null))
+
+/** 备料单角注：与图纸角注、三份导出单子同一份实测比例 */
+const calNote = computed(() => (lantern.value ? calibrationNote(lantern.value) : ''))
+const scale = computed(() => (lantern.value ? recordedScale(lantern.value) : null))
 
 const layerFabric = computed(() => {
   const l = lantern.value
@@ -55,6 +60,9 @@ function exportCsv() {
         <p class="sub">
           竹篾按<b>含绑扎余量</b>长度备料；蒙面按<b>含缝份</b>的裁片面积备料；
           批量总量 = 单灯 × 数量 × (1 + 损耗率)。
+        </p>
+        <p class="sub calib-note" :class="{ none: scale === null }">
+          备料单角注：{{ calNote }}
         </p>
       </div>
       <div class="ops">
@@ -130,6 +138,10 @@ function exportCsv() {
         <div class="stat"><span>灯体表面积</span><b>{{ full.materials.surfaceM2.toFixed(3) }} m²</b></div>
         <div class="stat"><span>构件总根数</span><b>{{ full.frame.totalQty }}</b></div>
         <div class="stat"><span>裁片总块数</span><b>{{ full.panels.totalQty }}</b></div>
+        <div class="stat">
+          <span>实测比例</span>
+          <b :class="{ none: scale === null }">{{ scale !== null ? fmtScalePct(scale) : '未校验' }}</b>
+        </div>
         <p class="rule">LED 建议规则：{{ CRAFT.led.rule }}</p>
       </div>
     </section>
@@ -199,6 +211,20 @@ h2 {
   font-size: 12.5px;
   color: var(--ink-soft);
   max-width: 900px;
+}
+
+.calib-note {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.calib-note.none {
+  color: #8a6a1f;
+}
+
+.stat b.none {
+  color: #8a6a1f;
 }
 
 .ops {

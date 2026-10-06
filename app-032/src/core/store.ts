@@ -6,6 +6,7 @@ import { reactive, watch } from 'vue'
 import type { Lantern } from './types'
 import { CRAFT, coveringSpec, presetById, PRESETS } from './craft'
 import { buildGeometry, effectiveHeight, r1 } from './geometry'
+import { buildCalibration } from './calibration'
 
 const KEY = 'lantern-frame-lofting.v1'
 
@@ -119,6 +120,28 @@ export function removeLantern(id: string) {
   if (i >= 0) state.lanterns.splice(i, 1)
 }
 
+/**
+ * 把实测校验结果记到灯样上（全套图纸/单子/换算列的唯一比例来源）。
+ * 仅在偏差 ≤ 1.0mm 容差内调用；policy 缺省沿用上一记录，否则 convert。
+ */
+export function recordCalibration(l: Lantern, measuredMm: number) {
+  l.calibration = buildCalibration(measuredMm, l.pageSize, l.overlapMm, l.calibration?.policy ?? 'convert')
+  l.updatedAt = new Date().toISOString()
+}
+
+/** 切换实测比例 ≠ 100% 时的处置路线（换算下料 / 重打原大） */
+export function setCalibrationPolicy(l: Lantern, policy: 'convert' | 'reprint') {
+  if (!l.calibration) return
+  l.calibration.policy = policy
+  l.updatedAt = new Date().toISOString()
+}
+
+/** 清除校验记录，回到「未测量」状态（不按原大处理） */
+export function clearCalibration(l: Lantern) {
+  delete l.calibration
+  l.updatedAt = new Date().toISOString()
+}
+
 function persistNow() {
   suspendPersist = true
   try {
@@ -176,6 +199,9 @@ export function useLanternStore() {
     duplicateLantern,
     removeLantern,
     distributeLayers,
-    syncLayerDiameters
+    syncLayerDiameters,
+    recordCalibration,
+    setCalibrationPolicy,
+    clearCalibration
   }
 }

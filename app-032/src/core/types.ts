@@ -12,6 +12,31 @@ export interface Point2 {
   y: number
 }
 
+/**
+ * 打印校验记录：按 100% 打印后实测校验尺回填得到的比例。
+ * 这是全套图纸/单子/换算列/存档共用的**唯一比例来源**；
+ * 旧灯样没有该字段 → 一律按「未测量」处理，不许当成原大。
+ */
+export interface PrintCalibration {
+  /** 校验尺标称长度（mm，1 位小数） */
+  nominalMm: number
+  /** 打印后实测长度（mm，1 位小数） */
+  measuredMm: number
+  /** 实测比例 = 实测 / 标称（1 = 原大；界面按百分数 2 位小数显示） */
+  scale: number
+  /** 记录时间（ISO） */
+  at: string
+  /** 记录时的纸张与搭接量：与当前设置不符时整套分页已重排，需重新校验 */
+  paper: PageSize
+  overlapMm: number
+  /**
+   * 实测比例 ≠ 100% 时的处置（二选一，认下代价）：
+   * convert = 按实测比例换算下料，图纸照旧能用，代价是每刀都要按新比例重新读数；
+   * reprint = 重打到原大才放行，纸上量多少是多少，代价是图纸与单子重出、已发的作废。
+   */
+  policy: 'convert' | 'reprint'
+}
+
 /** 分段（层）：高度为准，直径为轮廓派生结果 */
 export interface LayerSpec {
   heightMm: number
@@ -63,6 +88,8 @@ export interface Lantern {
   pageSize: PageSize
   /** 长条图跨页搭接量（mm） */
   overlapMm: number
+  /** 打印校验记录（实测比例）；无此字段 = 未测量，不得按原大处理 */
+  calibration?: PrintCalibration
   createdAt: string
   updatedAt: string
 }

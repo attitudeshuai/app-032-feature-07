@@ -3,6 +3,8 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { COVERINGS, PRESETS, coveringLabel, kindLabel, styleLabel } from '../core/craft'
 import { addLantern, createFromPreset, duplicateLantern, removeLantern, state } from '../core/store'
+import { fmtScalePct, recordedScale } from '../core/calibration'
+import type { Lantern } from '../core/types'
 
 const router = useRouter()
 
@@ -26,6 +28,12 @@ function del(id: string, name: string) {
 }
 
 const lanterns = computed(() => state.lanterns)
+
+/** 本机存档里记下的那一次实测比例；未测量显示「未校验」，不当原大 */
+function scaleText(l: Lantern): string {
+  const s = recordedScale(l)
+  return s === null ? '未校验' : fmtScalePct(s)
+}
 
 function updatedAt(iso: string): string {
   const d = new Date(iso)
@@ -87,6 +95,7 @@ function updatedAt(iso: string): string {
             <th>尺寸</th>
             <th>层数 / 棱数</th>
             <th>蒙面</th>
+            <th>打印比例</th>
             <th>最近修改</th>
             <th>操作</th>
           </tr>
@@ -98,6 +107,7 @@ function updatedAt(iso: string): string {
             <td class="mono">⌀{{ l.maxDiameterMm }} × H{{ l.totalHeightMm }}</td>
             <td class="mono">{{ l.layers.length }} 层 / {{ l.sides }} 棱</td>
             <td>{{ coveringLabel(l.covering) }}</td>
+            <td class="mono" :class="{ unmeasured: recordedScale(l) === null }">{{ scaleText(l) }}</td>
             <td class="mono">{{ updatedAt(l.updatedAt) }}</td>
             <td class="ops">
               <button @click="open(l.id)">打开</button>
@@ -344,6 +354,10 @@ button.danger:hover {
 
 .mono {
   font-family: var(--mono);
+}
+
+.unmeasured {
+  color: #8a6a1f;
 }
 
 .ops {

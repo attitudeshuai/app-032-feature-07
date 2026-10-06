@@ -9,6 +9,8 @@ import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { bodySurfaceArea } from '../core/geometry'
 import { downloadText, panelsCsv, shapeName } from '../core/exporter'
 import { coveringSpec } from '../core/craft'
+import { actualToPaper, calibrationNote, fmtScalePct, isOriginalScale, recordedScale } from '../core/calibration'
+import type { Panel } from '../core/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -18,6 +20,23 @@ const full = computed(() => {
   if (!l) return null
   return computeAll(l, { ...DEFAULT_LOFT_OPTIONS, paper: l.pageSize, overlapMm: l.overlapMm })
 })
+
+/** 记录在案的实测比例（null = 未校验，不按原大处理） */
+const scale = computed(() => (lantern.value ? recordedScale(lantern.value) : null))
+const calNote = computed(() => (lantern.value ? calibrationNote(lantern.value) : ''))
+/** 按实测比例换算下料（convert 且比例 ≠ 100%）时显示「纸上读数」行 */
+const showConvert = computed(() => {
+  const l = lantern.value
+  return !!(l?.calibration && l.calibration.policy === 'convert' && !isOriginalScale(l.calibration.scale))
+})
+const reprintPending = computed(() => lantern.value?.calibration?.policy === 'reprint')
+
+/** 纸上读数 = 裁切尺寸 × 实测比例（mm 1 位小数） */
+function paperReading(p: Panel): string {
+  const s = scale.value
+  if (s === null) return '—'
+  return `上 ${actualToPaper(p.widthTopMm, s).toFixed(1)} / 下 ${actualToPaper(p.widthBottomMm, s).toFixed(1)} × 高 ${actualToPaper(p.heightMm, s).toFixed(1)}`
+}
 
 const ratio = computed(() => {
   const l = lantern.value
@@ -72,7 +91,26 @@ function exportCsv() {
       <div class="stat"><span>含缝份裁片面积</span><b>{{ (full.panels.cutAreaMm2 / 1e6).toFixed(3) }} m²</b></div>
       <div class="stat"><span>灯体表面积</span><b>{{ full.materials.surfaceM2.toFixed(3) }} m²</b></div>
       <div class="stat"><span>净面积 / 表面积</span><b>{{ (ratio * 100).toFixed(2) }}%</b></div>
+      <div class="stat">
+        <span>实测比例</span>
+        <b :class="scale !== null ? (reprintPending ? 'bad' : 'ok') : 'none'">
+          {{ scale !== null ? fmtScalePct(scale) : '未校验' }}
+        </b>
+      </div>
     </section>
+
+    <p v-if="scale === null" class="calib-hint unset">
+      未实测校验尺：本页为标称尺寸（mm，1 位小数）。按 100% 打印后量 100.0mm 校验尺，到
+      <router-link :to="`/print/${lantern.id}`">1:1 放样图页</router-link> 回填实测长度。
+    </p>
+    <p v-else-if="reprintPending" class="calib-hint bad">
+      已选「重打到原大才放行」：本套图纸判不可用，重打并重新校验前不要按本页尺寸裁片。{{ calNote }}
+    </p>
+    <p v-else-if="showConvert" class="calib-hint">
+      实测比例 {{ fmtScalePct(scale!) }}：实际下料 = 纸上读数 ÷ 比例；「纸上读数」= 裁切尺寸 ×
+      {{ fmtScalePct(scale!) }}（mm，1 位小数）。每一次下刀都要按新比例重新读数，看错一次就裁错一块。
+    </p>
+    <p v-else class="calib-hint ok">实测比例 100.00%，与原大一致：纸上量多少就是多少。{{ calNote }}</p>
 
     <div class="cards">
       <article v-for="p in full.panels.panels" :key="p.id" class="card">
@@ -95,6 +133,10 @@ function exportCsv() {
             <tr class="cut">
               <td>裁切尺寸</td>
               <td class="mono">上 {{ p.widthTopMm.toFixed(1) }} / 下 {{ p.widthBottomMm.toFixed(1) }} × 高 {{ p.heightMm.toFixed(1) }}</td>
+            </tr>
+            <tr v-if="showConvert" class="paper">
+              <td>纸上读数</td>
+              <td class="mono">{{ paperReading(p) }}</td>
             </tr>
             <tr>
               <td>形状 / 缝份</td>
@@ -146,7 +188,7 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-03', 'CHK-05', 'CHK-06'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-03', 'CHK-05', 'CHK-06', 'CHK-09'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
       title="裁片与分页自检"
     />
@@ -317,6 +359,53 @@ button.primary:hover {
 .dims tr.cut td {
   color: #8f1c19;
   font-weight: 600;
+}
+
+.dims tr.paper td {
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.ok {
+  color: var(--jade);
+}
+
+.bad {
+  color: var(--red);
+}
+
+.none {
+  color: #8a6a1f;
+}
+
+.calib-hint {
+  margin: 0;
+  font-size: 12.5px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #eaf4ef;
+  border: 1px solid #cbe3d8;
+  color: var(--ink);
+}
+
+.calib-hint.unset {
+  background: #fff6e3;
+  border-color: #e8d5a8;
+  color: #8a6a1f;
+}
+
+.calib-hint.bad {
+  background: #fdecea;
+  border-color: #f2c7c1;
+  color: #8f1c19;
+}
+
+.calib-hint.ok {
+  color: var(--ink-soft);
+}
+
+.calib-hint a {
+  color: var(--red);
 }
 
 .mono {

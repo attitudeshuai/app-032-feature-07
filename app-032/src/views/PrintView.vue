@@ -6,11 +6,26 @@
  * - 骨架长条跨页处绘制对位十字、拼接编号与搭接量；
  * - 附 100mm 校验尺与 Ø100 校验圆，并显式提示「请关闭『适应页面』并按 100% 打印」。
  */
-import { computed, onUnmounted, reactive, watch, watchEffect } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
-import { getLantern } from '../core/store'
+import { clearCalibration, getLantern, recordCalibration, setCalibrationPolicy } from '../core/store'
 import { CALIBRATION_CIRCLE_MM, CALIBRATION_RULER_MM, computeAll } from '../core/checks'
+import {
+  calibrationNote,
+  calibrationNoteCompact,
+  evaluateMeasured,
+  fmtCm,
+  fmtDeviation,
+  fmtScalePct,
+  isOriginalScale,
+  MEASURE_MAX_MM,
+  MEASURE_MIN_MM,
+  NOMINAL_RULER_MM,
+  staleOutlets,
+  TOLERANCE_MM,
+  type CalibrationEval
+} from '../core/calibration'
 import {
   DEFAULT_LOFT_OPTIONS,
   PAPER_DIMS,
@@ -100,6 +115,84 @@ const labelPages = computed(() => {
   for (let i = 0; i < list.length; i += 10) out.push(list.slice(i, i + 10))
   return out.length ? out : [[]]
 })
+
+/* ---------- 打印比例校验：实测回填 → 核算 → 记到灯样 ---------- */
+
+/** 实测长度输入（mm，1 位小数） */
+const measuredInput = ref('')
+/** 本次核算超差的瞬态结果（不写入存档；本套图纸判不可用） */
+const lastFail = ref<CalibrationEval | null>(null)
+
+// 切换灯样时用存档实测值预填（无记录则清空，回到「未测量」）
+watch(
+  () => lantern.value?.id,
+  () => {
+    const c = lantern.value?.calibration
+    measuredInput.value = c ? c.measuredMm.toFixed(1) : ''
+    lastFail.value = null
+  },
+  { immediate: true }
+)
+
+const evalResult = computed<CalibrationEval | null>(() => {
+  const v = parseFloat(measuredInput.value)
+  if (!Number.isFinite(v)) return null
+  // 实测长度按 mm 留 1 位小数：显示、判定、存档用同一个舍入值
+  return evaluateMeasured(Math.round(v * 10) / 10)
+})
+
+const inputValid = computed(() => {
+  const v = parseFloat(measuredInput.value)
+  return Number.isFinite(v) && v >= MEASURE_MIN_MM && v <= MEASURE_MAX_MM
+})
+
+const cal = computed(() => lantern.value?.calibration ?? null)
+const calNote = computed(() => (lantern.value ? calibrationNote(lantern.value) : ''))
+const calNoteCompact = computed(() => (lantern.value ? calibrationNoteCompact(lantern.value) : ''))
+/** 存档环境与当前纸张/搭接不符的出口（换纸张/改搭接量后点名） */
+const staleList = computed(() => (lantern.value ? staleOutlets(lantern.value) : []))
+/** 实测比例 ≠ 100%（需要二选一处置） */
+const scaleOff = computed(() => (cal.value ? !isOriginalScale(cal.value.scale) : false))
+/** 本套图纸判不可用：本次超差，或已选「重打到原大才放行」 */
+const sheetUnusable = computed(() => !!lastFail.value || cal.value?.policy === 'reprint')
+
+const policy = computed<'convert' | 'reprint'>({
+  get: () => cal.value?.policy ?? 'convert',
+  set: (v) => {
+    const l = lantern.value
+    if (l) setCalibrationPolicy(l, v)
+  }
+})
+
+/** 核算并记录：≤1mm 容差才写入存档；超差只判本套不可用 */
+function recordMeasurement() {
+  const l = lantern.value
+  const e = evalResult.value
+  if (!l || !e || !inputValid.value) return
+  if (!e.withinTolerance) {
+    lastFail.value = e
+    return
+  }
+  const old = l.calibration?.scale
+  if (old !== undefined && Math.abs(old - e.scale) > 0.00005) {
+    const ok = window.confirm(
+      `新实测比例 ${fmtScalePct(e.scale)} 与已存档的 ${fmtScalePct(old)} 不一致。\n` +
+        '按旧比例打印/导出的图纸与三份单子、以及照它裁好的那几片料，要一起作废重来。\n确认用新比例覆盖存档？'
+    )
+    if (!ok) return
+  }
+  lastFail.value = null
+  recordCalibration(l, e.measuredMm)
+}
+
+function clearCal() {
+  const l = lantern.value
+  if (!l) return
+  if (window.confirm('清除本灯的打印校验记录？清除后各处恢复「比例未校验」，不按原大处理。')) {
+    lastFail.value = null
+    clearCalibration(l)
+  }
+}
 
 function setMode(m: PrintMode) {
   router.replace({ path: route.path, query: m === 'loft' ? {} : { view: m } })
@@ -194,7 +287,12 @@ function stripText(it: SheetItemStrip): string {
     `本段 ${f1(it.lengthMm)}mm（整根第 ${f1(it.startMm)}–${f1(it.startMm + it.lengthMm)}mm）`
   ]
   if (it.overlapMm > 0) {
-    const mates = [it.prevTag, it.nextTag].filter(Boolean).join(' / ')
+    const mates = [
+      it.prevTag ? `${it.prevTag}（第${it.prevPage}页）` : '',
+      it.nextTag ? `${it.nextTag}（第${it.nextPage}页）` : ''
+    ]
+      .filter(Boolean)
+      .join(' / ')
     parts.push(`与 ${mates} 搭接 ${f1(it.overlapMm)}mm`)
   }
   return parts.join(' · ')
@@ -202,6 +300,12 @@ function stripText(it: SheetItemStrip): string {
 
 function sheetFoot(s: { index: number }) {
   return `第 ${s.index}/${sheets.value.length} 页 · 请按 100% 打印（关闭「适应页面」）· 校验尺见第 1 页`
+}
+
+/** 每页页脚角注：页码 + 同一份实测比例（与其它出口同源，CHK-09） */
+function sheetCorner(s: { index: number }) {
+  const l = lantern.value
+  return `第 ${s.index}/${sheets.value.length} 页 · 单位 mm · 1:1 · ${l ? calibrationNoteCompact(l) : ''}`
 }
 
 function f1(v: number): string {
@@ -257,8 +361,95 @@ function today(): string {
 
       <p v-if="mode === 'loft'" class="warn">
         ⚠ 请在打印对话框里把缩放设为 <b>100%</b>（关闭「适应页面 / Fit to page」），纸张选
-        {{ opts.paper }}，页边距选「无」；打印后先用第 1 页的 100mm 校验尺核对，误差应 ≤ 1mm。
+        {{ opts.paper }}，页边距选「无」；打印后先用第 1 页的 {{ NOMINAL_RULER_MM.toFixed(1) }}mm 校验尺核对，
+        把实测长度填到下面，偏差应 ≤ {{ TOLERANCE_MM.toFixed(1) }}mm。
       </p>
+
+      <!-- ============ 打印比例校验：实测回填 → 核算 → 记到本灯 ============ -->
+      <section v-if="mode === 'loft'" class="calib" :class="{ fail: !!lastFail, unset: !cal }">
+        <header class="calib-head">
+          <h3>打印比例校验（1:1 核对）</h3>
+          <span v-if="cal" class="pill" :class="{ bad: cal.policy === 'reprint' }">
+            实测比例 {{ fmtScalePct(cal.scale) }}
+          </span>
+          <span v-else class="pill none">未校验（不按原大处理）</span>
+        </header>
+
+        <ol class="calib-steps">
+          <li>按 100% 打印本套图纸（关闭「适应页面」）；</li>
+          <li>用钢尺量第 1 页校验尺，把实测长度填回（mm，精确到 0.1）；</li>
+          <li>偏差 ≤ {{ TOLERANCE_MM.toFixed(1) }}mm 才记到本灯；超差则本套图纸判不可用。</li>
+        </ol>
+
+        <div class="calib-row">
+          <span class="nom">标称 {{ NOMINAL_RULER_MM.toFixed(1) }}mm（{{ fmtCm(NOMINAL_RULER_MM) }}）</span>
+          <label>
+            实测
+            <input
+              v-model="measuredInput"
+              type="number"
+              :min="MEASURE_MIN_MM"
+              :max="MEASURE_MAX_MM"
+              step="0.1"
+              placeholder="如 98.0"
+            />
+            mm
+          </label>
+          <button class="primary" :disabled="!inputValid" @click="recordMeasurement">核算并记录</button>
+          <button v-if="cal" @click="clearCal">清除记录</button>
+        </div>
+
+        <p v-if="evalResult && inputValid" class="calib-result" :class="{ bad: !evalResult.withinTolerance }">
+          实测比例 <b>{{ fmtScalePct(evalResult.scale) }}</b> · 偏差
+          <b>{{ fmtDeviation(evalResult.deviationMm) }}</b> · 实测 {{ evalResult.measuredMm.toFixed(1) }}mm（{{
+            fmtCm(evalResult.measuredMm)
+          }}）
+          <span v-if="evalResult.withinTolerance" class="ok">≤ 容差 ±{{ TOLERANCE_MM.toFixed(1) }}mm，可记录</span>
+          <span v-else class="bad">超差（容差 ±{{ TOLERANCE_MM.toFixed(1) }}mm）</span>
+        </p>
+
+        <div v-if="lastFail" class="unusable">
+          <b>✗ 本套图纸判不可用</b>：偏差 {{ fmtDeviation(lastFail.deviationMm) }} 超过 ±{{ TOLERANCE_MM.toFixed(1) }}mm
+          容差，不要照它下料。改法（任选其一后重打、重新实测）：
+          ① 打印对话框关闭「适应页面 / Fit to page」、缩放设 100%；
+          ② 换幅面更大的纸（A4 → A3）；
+          ③ 长条分幅打印（本套已自动分幅，按拼接编号粘接）。
+        </div>
+
+        <template v-if="cal">
+          <p class="calib-note">存档角注：{{ calNote }}</p>
+          <p v-if="staleList.length" class="stale">
+            ⚠ 改纸张/搭接量后整套分页已重排，但 {{ staleList.join('、') }} 还按老环境显示 ——
+            请重新打印校验尺实测回填，各出口才会一起刷新。
+          </p>
+
+          <div v-if="scaleOff" class="policy">
+            <p class="policy-head">
+              实测比例 {{ fmtScalePct(cal.scale) }} ≠ 100%：只有两条路，挑一条并认下代价 ——
+            </p>
+            <label class="policy-opt">
+              <input v-model="policy" type="radio" value="convert" />
+              <span>
+                <b>按实测比例换算下料</b>（图纸照旧能用）：实际下料 = 纸上读数 ÷ {{ fmtScalePct(cal.scale) }}，
+                构件表与裁片页已给出换算列。<em>代价：每一次下刀都要按新比例重新读数，看错一次就裁错一块。</em>
+              </span>
+            </label>
+            <label class="policy-opt">
+              <input v-model="policy" type="radio" value="reprint" />
+              <span>
+                <b>要求重打到原大才放行</b>（纸上量多少就是多少，不用换算）。<em>
+                  代价：图纸与随附的单子要重出，已经发到作坊的那一套作废，纸料与工时白搭。
+                </em>
+              </span>
+            </label>
+            <p class="scrap">
+              若挑错的那一版已经导出图纸与单子并照它裁过料：已导出的图纸与单子、已按错比例裁好的那几片，
+              要一起作废重来。
+            </p>
+          </div>
+          <p v-else class="calib-note">实测比例 100.00%，与原大一致，无需换算。</p>
+        </template>
+      </section>
 
       <section v-if="mode === 'loft'" class="summary">
         <div class="stat"><span>图纸页数</span><b>{{ sheets.length }} 页</b></div>
@@ -266,12 +457,22 @@ function today(): string {
         <div class="stat"><span>裁片不跨页断言</span><b :class="splitCheck.pass ? 'ok' : 'bad'">{{ splitCheck.pass ? '通过' : '失败' }}</b></div>
         <div class="stat"><span>超区整块输出</span><b>{{ splitCheck.overflow }} 块</b></div>
         <div class="stat"><span>底盖净直径</span><b>{{ f1(coverDims.botMm) }} mm</b></div>
+        <div class="stat">
+          <span>实测比例</span>
+          <b :class="cal ? (cal.policy === 'reprint' ? 'bad' : 'ok') : ''">
+            {{ cal ? fmtScalePct(cal.scale) : '未校验' }}
+          </b>
+        </div>
       </section>
       <p v-if="mode === 'loft'" class="sub detail">{{ splitCheck.detail }}</p>
     </section>
 
     <!-- ============ 1:1 放样图纸 ============ -->
     <div v-if="mode === 'loft'" class="sheets">
+      <p v-if="sheetUnusable" class="unusable-banner no-print">
+        ✗ 本套图纸判不可用：{{ lastFail ? `校验尺偏差 ${fmtDeviation(lastFail.deviationMm)} 超差` : '已选「重打到原大才放行」' }}
+        —— 不要照它下料；按上方改法重打并重新校验。
+      </p>
       <section
         v-for="s in sheets"
         :key="s.index"
@@ -393,8 +594,13 @@ function today(): string {
                 ⑥ 导出 PDF：在打印对话框选择「另存为 PDF」，尺寸与打印完全一致（本页已按 {{ opts.paper }}
                 设置 @page 尺寸）。
               </text>
+              <text class="cal-note" :x="it.xMm" :y="it.yMm + 230">
+                ⑦ 打印后实测①号校验尺并回本页「打印比例校验」回填：{{ calNoteCompact }}。偏差 ≤
+                {{ TOLERANCE_MM.toFixed(1) }}mm 才记到本灯；超差则本套图纸判不可用（关闭「适应页面」重打 /
+                换更大幅面的纸 / 分幅打印）。
+              </text>
               <text class="cal-foot" :x="it.xMm" :y="it.yMm + it.hMm - 2">
-                {{ lantern.name }} · 1:1 校验页 · {{ today() }}
+                {{ lantern.name }} · 1:1 校验页 · {{ today() }} · {{ calNoteCompact }}
               </text>
             </g>
 
@@ -533,7 +739,7 @@ function today(): string {
                 <line :x1="asStrip(it).xMm - 4" :x2="asStrip(it).xMm + 4" :y1="asStrip(it).yMm + 7" :y2="asStrip(it).yMm + 7" />
                 <line :x1="asStrip(it).xMm" :x2="asStrip(it).xMm" :y1="asStrip(it).yMm + 3" :y2="asStrip(it).yMm + 11" />
                 <text class="join-text" :x="asStrip(it).xMm" :y="asStrip(it).yMm + 2.6" text-anchor="middle">
-                  接 {{ asStrip(it).prevTag }} 搭接 {{ f1(asStrip(it).overlapMm) }}mm
+                  接 {{ asStrip(it).prevTag }}（第{{ asStrip(it).prevPage }}页）搭接 {{ f1(asStrip(it).overlapMm) }}mm
                 </text>
               </g>
               <g class="join" v-if="asStrip(it).nextTag">
@@ -555,14 +761,14 @@ function today(): string {
                   :y="asStrip(it).yMm + 2.6"
                   text-anchor="middle"
                 >
-                  续 {{ asStrip(it).nextTag }}
+                  续 {{ asStrip(it).nextTag }}（第{{ asStrip(it).nextPage }}页）
                 </text>
               </g>
             </g>
           </g>
 
           <text class="sheet-foot" :x="s.contentX" :y="s.hMm - 3.4">
-            {{ lantern.name }} · {{ sheetFoot(s) }} · 单位 mm · 1:1（100% 打印）
+            {{ lantern.name }} · {{ sheetCorner(s) }}
           </text>
         </svg>
       </section>
@@ -578,6 +784,7 @@ function today(): string {
         每端绑扎余量 {{ lantern.lashAllowanceMm }}mm · 蒙面 {{ coveringLabel(lantern.covering) }} ·
         打印日期 {{ today() }}
       </p>
+      <p class="doc-meta">比例角注：{{ calNote }}</p>
       <table class="doc-table">
         <thead>
           <tr>
@@ -648,7 +855,7 @@ function today(): string {
     <ChecksPanel
       v-if="full && mode === 'loft'"
       class="no-print"
-      :checks="full.checks.filter((c) => ['CHK-05', 'CHK-06', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-05', 'CHK-06', 'CHK-08', 'CHK-09', 'CHK-10'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
       title="放样与分页自检"
     />
@@ -822,6 +1029,218 @@ button.primary:hover {
 
 .bad {
   color: var(--red);
+}
+
+/* ---------- 打印比例校验 ---------- */
+.calib {
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface-2);
+}
+
+.calib.fail {
+  border-color: #e7a89f;
+  background: #fdf1ef;
+}
+
+.calib.unset {
+  border-style: dashed;
+}
+
+.calib-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.calib-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #8f1c19;
+}
+
+.pill {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #eaf4ef;
+  color: var(--jade);
+  border: 1px solid #cbe3d8;
+  font-family: var(--mono);
+}
+
+.pill.bad {
+  background: #fdecea;
+  color: var(--red);
+  border-color: #f2c7c1;
+}
+
+.pill.none {
+  background: #fff6e3;
+  color: #8a6a1f;
+  border-color: #e8d5a8;
+}
+
+.calib-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.calib-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+
+.calib-row .nom {
+  font-family: var(--mono);
+  color: var(--ink-soft);
+}
+
+.calib-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calib-row input[type='number'] {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 4px 6px;
+  width: 90px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.calib-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.calib-result {
+  margin: 0;
+  font-size: 12.5px;
+  background: #eaf4ef;
+  border: 1px solid #cbe3d8;
+  border-radius: 8px;
+  padding: 7px 12px;
+}
+
+.calib-result.bad {
+  background: #fdecea;
+  border-color: #f2c7c1;
+}
+
+.calib-result b {
+  font-family: var(--mono);
+}
+
+.calib-result .ok {
+  margin-left: 8px;
+  font-weight: 600;
+}
+
+.calib-result .bad {
+  margin-left: 8px;
+  font-weight: 600;
+}
+
+.unusable {
+  font-size: 12.5px;
+  color: #8f1c19;
+  background: #fdecea;
+  border: 1px solid #e7a89f;
+  border-radius: 8px;
+  padding: 8px 12px;
+  line-height: 1.7;
+}
+
+.calib-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+}
+
+.stale {
+  margin: 0;
+  font-size: 12.5px;
+  color: #8a6a1f;
+  background: #fff6e3;
+  border: 1px solid #e8d5a8;
+  border-radius: 8px;
+  padding: 7px 12px;
+}
+
+.policy {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+}
+
+.policy-head {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #8f1c19;
+}
+
+.policy-opt {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.policy-opt input {
+  margin-top: 3px;
+  accent-color: var(--red);
+}
+
+.policy-opt em {
+  font-style: normal;
+  color: var(--ink-soft);
+}
+
+.scrap {
+  margin: 0;
+  font-size: 12px;
+  color: #8f1c19;
+  border-top: 1px dashed var(--line-strong);
+  padding-top: 8px;
+}
+
+.unusable-banner {
+  margin: 0;
+  align-self: stretch;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #8f1c19;
+  background: #fdecea;
+  border: 1px solid #e7a89f;
+  border-radius: 8px;
+  padding: 8px 12px;
 }
 
 /* ---------- 图纸 ---------- */

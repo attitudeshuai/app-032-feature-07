@@ -44,11 +44,15 @@ export interface SheetItemStrip {
   segCount: number
   /** 本段起点在整根构件上的位置（mm），用于 1:1 图上标注标尺读数 */
   startMm: number
-  /** 拼接编号，如 S4-1/2 */
+  /** 所在图纸页码（拼接提示要翻到第几页） */
+  sheetIndex: number
+  /** 拼接编号，如 S3-1/2（第 3 根长条构件的第 1/2 段；按构件顺序编号，整份图纸内不重号） */
   tag: string
-  /** 相邻段编号（用于标注搭接方向） */
+  /** 相邻段编号与所在页码（用于标注搭接方向与翻页） */
   prevTag?: string
   nextTag?: string
+  prevPage?: number
+  nextPage?: number
   overlapMm: number
 }
 
@@ -186,7 +190,9 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
   if (opts.includeStrips) {
     const usable = contentW - STRIP_GUTTER - 4
     const overlap = Math.max(0, opts.overlapMm)
+    let stripSeq = 0
     for (const m of buildFrame(l).members) {
+      stripSeq++
       const total = m.lengthMm
       const advanceMm = Math.max(10, usable - overlap)
       const segCount = total <= usable + EPS ? 1 : Math.ceil((total - overlap) / advanceMm)
@@ -196,7 +202,8 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
         if (!fitsRow(contentW)) nextRow()
         if (!fitsPage(STRIP_ROW_H)) startSheet()
         const cur = ensureSheet()
-        const tag = `S${cur.index}-${i + 1}/${segCount}`
+        // 拼接编号按构件顺序编排：S{构件序}-{段序}/{段数}，整份图纸内不重号、不断号
+        const tag = `S${stripSeq}-${i + 1}/${segCount}`
         cur.items.push({
           type: 'strip',
           member: m,
@@ -207,6 +214,7 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
           segIndex: i,
           segCount,
           startMm: start,
+          sheetIndex: cur.index,
           tag,
           overlapMm: segCount > 1 ? overlap : 0
         })
@@ -216,7 +224,7 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
     }
   }
 
-  // 回填相邻段编号（拼接方向提示）
+  // 回填相邻段编号与所在页码（拼接方向与翻页提示）
   const byMember = new Map<string, SheetItemStrip[]>()
   for (const s of sheets) {
     for (const it of s.items) {
@@ -229,8 +237,14 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
   for (const arr of byMember.values()) {
     arr.sort((a, b) => a.segIndex - b.segIndex)
     arr.forEach((it, i) => {
-      if (arr[i - 1]) it.prevTag = arr[i - 1].tag
-      if (arr[i + 1]) it.nextTag = arr[i + 1].tag
+      if (arr[i - 1]) {
+        it.prevTag = arr[i - 1].tag
+        it.prevPage = arr[i - 1].sheetIndex
+      }
+      if (arr[i + 1]) {
+        it.nextTag = arr[i + 1].tag
+        it.nextPage = arr[i + 1].sheetIndex
+      }
     })
   }
 

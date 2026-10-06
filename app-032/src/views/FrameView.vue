@@ -8,6 +8,7 @@ import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { groupMembers } from '../core/frame'
 import { kindName, membersCsv, downloadText } from '../core/exporter'
 import { styleLabel } from '../core/craft'
+import { actualToPaper, calibrationNote, fmtScalePct, isOriginalScale, recordedScale } from '../core/calibration'
 import type { FrameMember } from '../core/types'
 
 const route = useRoute()
@@ -19,6 +20,22 @@ const full = computed(() => {
   return computeAll(l, { ...DEFAULT_LOFT_OPTIONS, paper: l.pageSize, overlapMm: l.overlapMm })
 })
 const groups = computed(() => (full.value ? groupMembers(full.value.frame.members) : []))
+
+/** 记录在案的实测比例（null = 未校验，不按原大处理） */
+const scale = computed(() => (lantern.value ? recordedScale(lantern.value) : null))
+const calNote = computed(() => (lantern.value ? calibrationNote(lantern.value) : ''))
+/** 按实测比例换算下料（convert 且比例 ≠ 100%）时显示「纸上读数」列 */
+const showConvert = computed(() => {
+  const l = lantern.value
+  return !!(l?.calibration && l.calibration.policy === 'convert' && !isOriginalScale(l.calibration.scale))
+})
+const reprintPending = computed(() => lantern.value?.calibration?.policy === 'reprint')
+
+/** 纸上读数 = 实际下料尺寸 × 实测比例（在这套图纸上应量到的长度，mm 1 位小数） */
+function paperReading(mm: number): string {
+  const s = scale.value
+  return s === null ? '—' : actualToPaper(mm, s).toFixed(1)
+}
 
 function bendText(m: FrameMember): string {
   if (m.bendRadiusMm) return `R${m.bendRadiusMm.toFixed(1)}mm`
@@ -58,7 +75,26 @@ function exportCsv() {
       <div class="stat"><span>备料总长（含余量）</span><b>{{ (full.frame.stockLengthMm / 1000).toFixed(3) }} m</b></div>
       <div class="stat"><span>净长合计</span><b>{{ (full.frame.rawLengthMm / 1000).toFixed(3) }} m</b></div>
       <div class="stat"><span>绑扎余量合计</span><b>{{ full.frame.lashExtraMm.toFixed(1) }} mm</b></div>
+      <div class="stat">
+        <span>实测比例</span>
+        <b :class="scale !== null ? (reprintPending ? 'bad' : 'ok') : 'none'">
+          {{ scale !== null ? fmtScalePct(scale) : '未校验' }}
+        </b>
+      </div>
     </section>
+
+    <p v-if="scale === null" class="calib-hint unset">
+      未实测校验尺：本表为标称尺寸（mm，1 位小数）。按 100% 打印后量 100.0mm 校验尺，到
+      <router-link :to="`/print/${lantern.id}`">1:1 放样图页</router-link> 回填实测长度。
+    </p>
+    <p v-else-if="reprintPending" class="calib-hint bad">
+      已选「重打到原大才放行」：本套图纸判不可用，重打并重新校验前不要按本表下料。{{ calNote }}
+    </p>
+    <p v-else-if="showConvert" class="calib-hint">
+      实测比例 {{ fmtScalePct(scale!) }}：下刀前把纸上量到的读数 ÷ 比例 = 实际下料尺寸；
+      「纸上读数」列 = 截取长度 × {{ fmtScalePct(scale!) }}（mm，1 位小数）。每一次下刀都要按新比例重新读数。
+    </p>
+    <p v-else class="calib-hint ok">实测比例 100.00%，与原大一致：纸上量多少就是多少。{{ calNote }}</p>
 
     <section v-for="grp in groups" :key="grp.group" class="group">
       <h3>{{ grp.group }}</h3>
@@ -69,6 +105,7 @@ function exportCsv() {
             <th>类别</th>
             <th class="num">净长 (mm)</th>
             <th class="num">截取长度 (mm，含余量)</th>
+            <th v-if="showConvert" class="num">纸上读数 (mm)</th>
             <th class="num">余量处数</th>
             <th class="num">数量</th>
             <th class="num">总截取长 (mm)</th>
@@ -82,6 +119,7 @@ function exportCsv() {
             <td>{{ kindName(m.kind) }}</td>
             <td class="num mono">{{ m.rawLengthMm.toFixed(1) }}</td>
             <td class="num mono strong">{{ m.lengthMm.toFixed(1) }}</td>
+            <td v-if="showConvert" class="num mono paper">{{ paperReading(m.lengthMm) }}</td>
             <td class="num mono">×{{ m.lashJoints }}</td>
             <td class="num mono">{{ m.qty }}</td>
             <td class="num mono">{{ (m.lengthMm * m.qty).toFixed(1) }}</td>
@@ -93,7 +131,7 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08', 'CHK-09'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
       title="骨架计算自检"
     />
@@ -257,6 +295,53 @@ tr:last-child td {
   color: var(--ink-soft);
   font-size: 12px;
   max-width: 340px;
+}
+
+.ok {
+  color: var(--jade);
+}
+
+.bad {
+  color: var(--red);
+}
+
+.none {
+  color: #8a6a1f;
+}
+
+.paper {
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.calib-hint {
+  margin: 0;
+  font-size: 12.5px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #eaf4ef;
+  border: 1px solid #cbe3d8;
+  color: var(--ink);
+}
+
+.calib-hint.unset {
+  background: #fff6e3;
+  border-color: #e8d5a8;
+  color: #8a6a1f;
+}
+
+.calib-hint.bad {
+  background: #fdecea;
+  border-color: #f2c7c1;
+  color: #8f1c19;
+}
+
+.calib-hint.ok {
+  color: var(--ink-soft);
+}
+
+.calib-hint a {
+  color: var(--red);
 }
 
 .missing {
